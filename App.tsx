@@ -38,8 +38,35 @@ const App: React.FC = () => {
   const [filterSem, setFilterSem] = useState<string>('all');
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [activeTab, setActiveTab] = useState<'graph' | 'matrix'>('graph');
+  const [newStudentId, setNewStudentId] = useState('');
+  const [newStudentName, setNewStudentName] = useState('');
+  const [adminNotice, setAdminNotice] = useState('');
 
   // 管理员登录后预取全部学生列表，避免需先以学生身份登录
+  useEffect(() => {
+    const fetchAllStudentsForAdmin = async () => {
+      if (currentUser?.isAdmin) {
+        try {
+          const res = await fetch('/.netlify/functions/student-api');
+          if (res.ok) {
+            const list = await res.json();
+            if (Array.isArray(list)) {
+              const mapped = list.reduce<Record<string, StudentProfile>>((acc, s) => {
+                if (s?.id) acc[s.id] = s as StudentProfile;
+                return acc;
+              }, {});
+              setDb({ students: mapped });
+            }
+          }
+        } catch (e) {
+          console.error('Cloud fetch all error', e);
+        }
+      }
+    };
+    fetchAllStudentsForAdmin();
+  }, [currentUser?.isAdmin]);
+
+  // 管理员登录后预取全部学生列表
   useEffect(() => {
     const fetchAllStudentsForAdmin = async () => {
       if (currentUser?.isAdmin) {
@@ -129,6 +156,52 @@ const App: React.FC = () => {
       } catch (e) {
         console.error("Cloud save error", e);
       }
+    }
+  };
+
+  // --- Admin Management ---
+  const handleAdminCreateStudent = async () => {
+    if (!currentUser?.isAdmin) return;
+    const id = newStudentId.trim();
+    const name = newStudentName.trim();
+    if (!id || !name) {
+      setAdminNotice('请填写学号与姓名');
+      return;
+    }
+    const newProfile: StudentProfile = { id, name, selectedIds: [] };
+    setDb(prev => ({
+      students: { ...prev.students, [id]: newProfile }
+    }));
+    setViewingStudentId(id);
+    setSelectedIds(new Set());
+    try {
+      await fetch('/.netlify/functions/student-api', {
+        method: 'POST',
+        body: JSON.stringify(newProfile),
+      });
+      setAdminNotice('已新增/更新学生');
+    } catch (e) {
+      console.error('Cloud admin create error', e);
+      setAdminNotice('保存失败，请稍后重试');
+    }
+  };
+
+  const handleAdminDeleteStudent = async () => {
+    if (!currentUser?.isAdmin || !viewingStudentId) return;
+    const targetId = viewingStudentId;
+    setDb(prev => {
+      const next = { ...prev.students };
+      delete next[targetId];
+      return { students: next };
+    });
+    setViewingStudentId(null);
+    setSelectedIds(new Set());
+    try {
+      await fetch(`/.netlify/functions/student-api?id=${targetId}`, { method: 'DELETE' });
+      setAdminNotice('已删除学生');
+    } catch (e) {
+      console.error('Cloud admin delete error', e);
+      setAdminNotice('删除失败，请稍后重试');
     }
   };
 
@@ -410,17 +483,47 @@ const App: React.FC = () => {
         
         {/* Admin Student Switcher */}
         {currentUser.isAdmin && (
-          <div className="flex items-center gap-2">
-            <select 
-               className="bg-blue-800 text-white text-xs border border-blue-600 rounded px-2 py-1 outline-none"
-               value={viewingStudentId || ''}
-               onChange={e => setViewingStudentId(e.target.value)}
-            >
-              <option value="" disabled>选择学生查看...</option>
-              {Object.values(db.students).map(s => (
-                <option key={s.id} value={s.id}>{s.id} - {s.name}</option>
-              ))}
-            </select>
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              <select 
+                 className="bg-blue-800 text-white text-xs border border-blue-600 rounded px-2 py-1 outline-none"
+                 value={viewingStudentId || ''}
+                 onChange={e => setViewingStudentId(e.target.value)}
+              >
+                <option value="" disabled>选择学生查看...</option>
+                {Object.values(db.students).map(s => (
+                  <option key={s.id} value={s.id}>{s.id} - {s.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <input 
+                value={newStudentId}
+                onChange={e => setNewStudentId(e.target.value)}
+                placeholder="学号"
+                className="px-2 py-1 rounded bg-blue-800 text-white border border-blue-600 outline-none placeholder:text-blue-200"
+              />
+              <input 
+                value={newStudentName}
+                onChange={e => setNewStudentName(e.target.value)}
+                placeholder="姓名"
+                className="px-2 py-1 rounded bg-blue-800 text-white border border-blue-600 outline-none placeholder:text-blue-200"
+              />
+              <button 
+                onClick={handleAdminCreateStudent}
+                className="bg-emerald-600 hover:bg-emerald-500 px-2 py-1 rounded transition text-white font-semibold"
+              >
+                新增/更新
+              </button>
+              <button 
+                onClick={handleAdminDeleteStudent}
+                disabled={!viewingStudentId}
+                className={`px-2 py-1 rounded transition font-semibold ${viewingStudentId ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-slate-500 text-slate-300 cursor-not-allowed'}`}
+              >
+                删除当前
+              </button>
+            </div>
+            {adminNotice && <div className="text-[11px] text-blue-100">{adminNotice}</div>}
           </div>
         )}
 

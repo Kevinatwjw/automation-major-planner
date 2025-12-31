@@ -39,6 +39,16 @@ export default async (req: Request) => {
     });
   }
 
+  // DELETE: 删除
+  if (req.method === 'DELETE') {
+    const url = new URL(req.url);
+    const id = url.searchParams.get('id');
+    if (!id) return new Response("Missing ID", { status: 400 });
+
+    await sql`DELETE FROM students WHERE id = ${id}`;
+    return new Response("Deleted", { status: 200 });
+  }
+
   // POST: 保存
   if (req.method === 'POST') {
     try {
