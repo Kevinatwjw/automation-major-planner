@@ -39,24 +39,31 @@ const App: React.FC = () => {
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [activeTab, setActiveTab] = useState<'graph' | 'matrix'>('graph');
 
-  // --- Initialization & DB ---
+  // 新增：从云端数据库读取
   useEffect(() => {
-    const savedDb = localStorage.getItem('automation_planner_db');
-    if (savedDb) {
-      try {
-        setDb(JSON.parse(savedDb));
-      } catch (e) {
-        console.error("Failed to parse DB", e);
+    const fetchStudentData = async () => {
+      if (viewingStudentId) { 
+        try {
+          const res = await fetch(`/.netlify/functions/student-api?id=${viewingStudentId}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data) {
+              setDb(prev => ({
+                ...prev,
+                students: { ...prev.students, [data.id]: data }
+              }));
+              if (data.selectedIds) {
+                setSelectedIds(new Set(data.selectedIds));
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Cloud fetch error", e);
+        }
       }
-    }
-  }, []);
-
-  // Persist DB whenever it changes
-  useEffect(() => {
-    if (Object.keys(db.students).length > 0) {
-      localStorage.setItem('automation_planner_db', JSON.stringify(db));
-    }
-  }, [db]);
+    };
+    fetchStudentData();
+  }, [viewingStudentId]);
 
   // Sync selectedIds from DB when switching viewed student
   useEffect(() => {
@@ -68,19 +75,36 @@ const App: React.FC = () => {
   }, [viewingStudentId]); // Intentionally not depending on DB to avoid loops, only when ID switches
 
   // Save selectedIds to DB when they change (if a student is active)
-  const handleSelectionChange = (newSet: Set<string>) => {
-    setSelectedIds(newSet);
+  // 修改：保存到云端数据库
+  const handleSelectionChange = async (newSet: Set<string>) => {
+    setSelectedIds(newSet); // 1. 界面立即更新
+    
     if (viewingStudentId) {
+      const currentStudent = db.students[viewingStudentId] || { 
+        id: viewingStudentId, 
+        name: currentUser?.name || 'Unknown', 
+        selectedIds: [] 
+      };
+      const updatedStudent = {
+        ...currentStudent,
+        selectedIds: Array.from(newSet)
+      };
+
+      // 2. 更新本地状态
       setDb(prev => ({
         ...prev,
-        students: {
-          ...prev.students,
-          [viewingStudentId]: {
-            ...prev.students[viewingStudentId],
-            selectedIds: Array.from(newSet)
-          }
-        }
+        students: { ...prev.students, [viewingStudentId]: updatedStudent }
       }));
+
+      // 3. 发送给后端
+      try {
+        await fetch('/.netlify/functions/student-api', {
+          method: 'POST',
+          body: JSON.stringify(updatedStudent),
+        });
+      } catch (e) {
+        console.error("Cloud save error", e);
+      }
     }
   };
 
