@@ -48,6 +48,11 @@ const App: React.FC = () => {
   const [detailClassName, setDetailClassName] = useState('');
   const [detailGrade, setDetailGrade] = useState('');
   const [adminNotice, setAdminNotice] = useState('');
+  const [studentInfoId, setStudentInfoId] = useState('');
+  const [studentInfoName, setStudentInfoName] = useState('');
+  const [studentInfoClass, setStudentInfoClass] = useState('');
+  const [studentInfoGrade, setStudentInfoGrade] = useState('');
+  const [studentNotice, setStudentNotice] = useState('');
 
   interface RequirementStatus {
     id: string;
@@ -78,6 +83,50 @@ const App: React.FC = () => {
     });
 
     return { totalCredits, creditsBySubCategory, creditsByCategory };
+  };
+
+  const handleStudentUpdateInfo = async () => {
+    if (currentUser?.isAdmin || !currentUser || viewingStudentId !== currentUser.id) return;
+    const id = studentInfoId.trim();
+    const name = studentInfoName.trim();
+    const className = studentInfoClass.trim();
+    const grade = studentInfoGrade.trim();
+    const validationError = validateProfileInput({ id, name, className, grade });
+    if (validationError) {
+      setStudentNotice(validationError);
+      return;
+    }
+    const prevId = currentUser.id;
+    const existing = db.students[prevId] || { id: prevId, name, selectedIds: Array.from(selectedIds) };
+    const updated: StudentProfile = {
+      ...existing,
+      id,
+      name,
+      className,
+      grade,
+      selectedIds: existing.selectedIds
+    };
+    setDb(prev => {
+      const next = { ...prev.students };
+      delete next[prevId];
+      next[updated.id] = updated;
+      return { students: next };
+    });
+    setViewingStudentId(updated.id);
+    setStudentNotice('已保存');
+    setCurrentUser({ ...currentUser, id: updated.id, name: updated.name });
+    try {
+      await fetch('/.netlify/functions/student-api', {
+        method: 'POST',
+        body: JSON.stringify(updated),
+      });
+      if (prevId !== updated.id) {
+        await fetch(`/.netlify/functions/student-api?id=${prevId}`, { method: 'DELETE' });
+      }
+    } catch (e) {
+      console.error('Student update error', e);
+      setStudentNotice('保存失败，请稍后重试');
+    }
   };
 
   const getRequirementStatus = (
@@ -113,6 +162,18 @@ const App: React.FC = () => {
       description: req.description,
       category: req.category
     };
+  };
+
+  const validateProfileInput = (profile: { id?: string; name?: string; className?: string; grade?: string }) => {
+    const id = profile.id?.trim() || '';
+    const name = profile.name?.trim() || '';
+    const className = profile.className?.trim() || '';
+    const grade = profile.grade?.trim() || '';
+    if (!/^\d{11}$/.test(id)) return '学号需为11位数字';
+    if (!name) return '姓名不能为空';
+    if (!/^电自\d{4}班$/.test(className)) return '班级格式应为“电自2204班”';
+    if (!/^\d{4}级$/.test(grade)) return '年级格式应为“2022级”';
+    return '';
   };
 
   // 管理员登录后预取全部学生列表
@@ -183,6 +244,17 @@ const App: React.FC = () => {
     setDetailGrade(s?.grade || '');
   }, [viewingStudentId, db.students]);
 
+  // 学生端信息表单同步
+  useEffect(() => {
+    if (!currentUser?.isAdmin && viewingStudentId === currentUser?.id) {
+      const s = db.students[viewingStudentId || ''] || null;
+      setStudentInfoId(s?.id || viewingStudentId || '');
+      setStudentInfoName(s?.name || '');
+      setStudentInfoClass(s?.className || '');
+      setStudentInfoGrade(s?.grade || '');
+    }
+  }, [currentUser?.isAdmin, viewingStudentId, db.students, currentUser?.id]);
+
   // Save selectedIds to DB when they change (if a student is active)
   // 修改：保存到云端数据库
   const handleSelectionChange = async (newSet: Set<string>) => {
@@ -226,8 +298,9 @@ const App: React.FC = () => {
     const name = newStudentName.trim();
     const className = newStudentClass.trim();
     const grade = newStudentGrade.trim();
-    if (!id || !name) {
-      setAdminNotice('请填写学号与姓名');
+    const validationError = validateProfileInput({ id, name, className, grade });
+    if (validationError) {
+      setAdminNotice(validationError);
       return;
     }
     const newProfile: StudentProfile = { id, name, className, grade, selectedIds: [] };
@@ -275,8 +348,11 @@ const App: React.FC = () => {
     if (!currentUser?.isAdmin || !viewingStudentId) return;
     const id = detailId.trim();
     const name = detailName.trim();
-    if (!id || !name) {
-      setAdminNotice('请填写学号与姓名');
+    const className = detailClassName.trim();
+    const grade = detailGrade.trim();
+    const validationError = validateProfileInput({ id, name, className, grade });
+    if (validationError) {
+      setAdminNotice(validationError);
       return;
     }
     const prevId = viewingStudentId;
@@ -285,8 +361,8 @@ const App: React.FC = () => {
       ...existing,
       id,
       name,
-      className: detailClassName.trim(),
-      grade: detailGrade.trim(),
+      className,
+      grade,
     };
 
     setDb(prev => {
@@ -897,7 +973,56 @@ const App: React.FC = () => {
              <p>请在上方选择一个学生以查看和修改其培养方案</p>
           </div>
         ) : (
-        <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-col flex-1 overflow-hidden">
+          {!currentUser.isAdmin && currentUser.id === viewingStudentId && (
+            <div className="bg-white border-b border-slate-200 p-4">
+              <h3 className="text-base font-bold text-slate-800 mb-2">我的信息</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-slate-500">学号</span>
+                  <input 
+                    value={studentInfoId}
+                    onChange={e => setStudentInfoId(e.target.value)}
+                    className="px-3 py-2 border rounded outline-none border-slate-300 focus:border-blue-500"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-slate-500">姓名</span>
+                  <input 
+                    value={studentInfoName}
+                    onChange={e => setStudentInfoName(e.target.value)}
+                    className="px-3 py-2 border rounded outline-none border-slate-300 focus:border-blue-500"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-slate-500">班级</span>
+                  <input 
+                    value={studentInfoClass}
+                    onChange={e => setStudentInfoClass(e.target.value)}
+                    className="px-3 py-2 border rounded outline-none border-slate-300 focus:border-blue-500"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-slate-500">年级</span>
+                  <input 
+                    value={studentInfoGrade}
+                    onChange={e => setStudentInfoGrade(e.target.value)}
+                    className="px-3 py-2 border rounded outline-none border-slate-300 focus:border-blue-500"
+                  />
+                </label>
+              </div>
+              <div className="mt-3 flex gap-2 items-center">
+                <button 
+                  onClick={handleStudentUpdateInfo}
+                  className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
+                >
+                  保存我的信息
+                </button>
+                {studentNotice && <span className="text-xs text-emerald-700">{studentNotice}</span>}
+              </div>
+            </div>
+          )}
+          <div className="flex flex-1 overflow-hidden">
           
           {/* Left Sidebar: Stats & Check */}
           <aside className="w-80 bg-white border-r border-slate-200 flex flex-col overflow-y-auto z-10 shadow-sm shrink-0">
@@ -992,69 +1117,137 @@ const App: React.FC = () => {
                   <div className="text-center p-10 text-slate-400">无符合条件的课程</div>
               )}
 
-              {Object.entries(groupedCourses).map(([catName, subCats]) => (
-                <div key={catName} className="bg-white rounded-lg shadow-sm ring-1 ring-slate-900/5 overflow-hidden">
-                  <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 font-bold text-slate-700 flex items-center gap-2">
-                    <span className="w-1.5 h-4 bg-primary rounded-full"></span>
-                    {catName}
-                  </div>
-                  
-                  {Object.entries(subCats).map(([subCatName, modules]) => (
-                    <div key={subCatName} className="border-b border-slate-100 last:border-0">
-                      <div className="bg-slate-50/50 px-4 py-1.5 text-xs font-bold text-slate-500 uppercase tracking-wide">
-                        {subCatName}
-                      </div>
-                      
-                      {Object.entries(modules).map(([moduleName, courses]) => (
-                        <div key={moduleName}>
-                          {moduleName !== '默认' && (
-                            <div className="px-4 py-1 text-xs text-blue-600 font-medium bg-blue-50 border-l-4 border-blue-200 pl-3">
-                              {moduleName}
-                            </div>
-                          )}
-                          <table className="w-full text-sm text-left">
-                            <tbody className="divide-y divide-slate-100">
-                              {courses.map(course => {
-                                const isSelected = selectedIds.has(course.id);
-                                const isActive = activeCourseId === course.id;
-                                return (
-                                  <tr 
-                                    key={course.id} 
-                                    className={`hover:bg-blue-50 transition cursor-pointer ${isActive ? 'bg-blue-50' : ''}`}
-                                    onClick={() => setActiveCourseId(course.id)}
-                                  >
-                                    <td className="px-4 py-3 w-10 text-center" onClick={(e) => e.stopPropagation()}>
-                                      <input 
-                                        type="checkbox" 
-                                        checked={isSelected} 
-                                        onChange={() => toggleCourse(course.id)}
-                                        className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary cursor-pointer accent-blue-600"
-                                      />
-                                    </td>
-                                    <td className="px-4 py-3 font-mono text-xs text-slate-400 w-24">{course.code}</td>
-                                    <td className="px-4 py-3 font-medium text-slate-900">
-                                      {course.isCore && <span className="text-amber-500 mr-1" title="核心课程">★</span>}
-                                      {course.name}
-                                      {course.type === CourseType.Elective && (
-                                        <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-normal">选</span>
-                                      )}
-                                       {course.type === CourseType.Compulsory && (
-                                        <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-normal">必</span>
-                                      )}
-                                    </td>
-                                    <td className="px-4 py-3 w-20 text-slate-600 font-semibold text-right">{course.credit}学分</td>
-                                    <td className="px-4 py-3 w-24 text-slate-500 text-right">{course.semester}</td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      ))}
+              {Object.entries(groupedCourses).map(([catName, subCats]) => {
+                const catCourseIds = Object.values(subCats).flatMap(modules =>
+                  Object.values(modules).flatMap(courses => courses.map(c => c.id))
+                );
+                const catAllSelected = catCourseIds.length > 0 && catCourseIds.every(id => selectedIds.has(id));
+                const toggleCat = () => {
+                  const newSet = new Set(selectedIds);
+                  if (catAllSelected) {
+                    catCourseIds.forEach(id => newSet.delete(id));
+                  } else {
+                    catCourseIds.forEach(id => newSet.add(id));
+                  }
+                  handleSelectionChange(newSet);
+                };
+                return (
+                  <div key={catName} className="bg-white rounded-lg shadow-sm ring-1 ring-slate-900/5 overflow-hidden">
+                    <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 font-bold text-slate-700 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={catAllSelected}
+                        onChange={toggleCat}
+                        onClick={e => e.stopPropagation()}
+                        className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary cursor-pointer accent-blue-600"
+                      />
+                      <span className="w-1.5 h-4 bg-primary rounded-full"></span>
+                      {catName}
                     </div>
-                  ))}
-                </div>
-              ))}
+                    
+                    {Object.entries(subCats).map(([subCatName, modules]) => {
+                      const subCatCourseIds = Object.values(modules).flatMap(courses => courses.map(c => c.id));
+                      const subAll = subCatCourseIds.length > 0 && subCatCourseIds.every(id => selectedIds.has(id));
+                      const toggleSub = () => {
+                        const newSet = new Set(selectedIds);
+                        if (subAll) subCatCourseIds.forEach(id => newSet.delete(id));
+                        else subCatCourseIds.forEach(id => newSet.add(id));
+                        handleSelectionChange(newSet);
+                      };
+                      return (
+                        <div key={subCatName} className="border-b border-slate-100 last:border-0">
+                          <div className="bg-slate-50/50 px-4 py-1.5 text-xs font-bold text-slate-500 uppercase tracking-wide flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={subAll}
+                              onChange={toggleSub}
+                              onClick={e => e.stopPropagation()}
+                              className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary cursor-pointer accent-blue-600"
+                            />
+                            {subCatName}
+                          </div>
+                          
+                          {Object.entries(modules).map(([moduleName, courses]) => {
+                            const moduleIds = courses.map(c => c.id);
+                            const moduleAll = moduleIds.length > 0 && moduleIds.every(id => selectedIds.has(id));
+                            const toggleModule = () => {
+                              const newSet = new Set(selectedIds);
+                              if (moduleAll) moduleIds.forEach(id => newSet.delete(id));
+                              else moduleIds.forEach(id => newSet.add(id));
+                              handleSelectionChange(newSet);
+                            };
+                            return (
+                              <div key={moduleName}>
+                                {moduleName !== '默认' && (
+                                  <div className="px-4 py-1 text-xs text-blue-600 font-medium bg-blue-50 border-l-4 border-blue-200 pl-3 flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={moduleAll}
+                                      onChange={toggleModule}
+                                      onClick={e => e.stopPropagation()}
+                                      className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary cursor-pointer accent-blue-600"
+                                    />
+                                    {moduleName}
+                                  </div>
+                                )}
+                                {moduleName === '默认' && (
+                                  <div className="px-4 py-1 text-xs text-slate-500 bg-white flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={moduleAll}
+                                      onChange={toggleModule}
+                                      onClick={e => e.stopPropagation()}
+                                      className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary cursor-pointer accent-blue-600"
+                                    />
+                                    <span className="text-slate-600">全选本组</span>
+                                  </div>
+                                )}
+                                <table className="w-full text-sm text-left">
+                                  <tbody className="divide-y divide-slate-100">
+                                    {courses.map(course => {
+                                      const isSelected = selectedIds.has(course.id);
+                                      const isActive = activeCourseId === course.id;
+                                      return (
+                                        <tr 
+                                          key={course.id} 
+                                          className={`hover:bg-blue-50 transition cursor-pointer ${isActive ? 'bg-blue-50' : ''}`}
+                                          onClick={() => setActiveCourseId(course.id)}
+                                        >
+                                          <td className="px-4 py-3 w-10 text-center" onClick={(e) => e.stopPropagation()}>
+                                            <input 
+                                              type="checkbox" 
+                                              checked={isSelected} 
+                                              onChange={() => toggleCourse(course.id)}
+                                              className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary cursor-pointer accent-blue-600"
+                                            />
+                                          </td>
+                                          <td className="px-4 py-3 font-mono text-xs text-slate-400 w-24">{course.code}</td>
+                                          <td className="px-4 py-3 font-medium text-slate-900">
+                                            {course.isCore && <span className="text-amber-500 mr-1" title="核心课程">★</span>}
+                                            {course.name}
+                                            {course.type === CourseType.Elective && (
+                                              <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-normal">选</span>
+                                            )}
+                                             {course.type === CourseType.Compulsory && (
+                                              <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-normal">必</span>
+                                            )}
+                                          </td>
+                                          <td className="px-4 py-3 w-20 text-slate-600 font-semibold text-right">{course.credit}学分</td>
+                                          <td className="px-4 py-3 w-24 text-slate-500 text-right">{course.semester}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
             </div>
           </main>
 
@@ -1148,6 +1341,7 @@ const App: React.FC = () => {
              </div>
           </aside>
 
+        </div>
         </div>
         )}
       </>
