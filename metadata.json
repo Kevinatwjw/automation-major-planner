@@ -1,0 +1,5 @@
+{
+  "name": "Automation Major Planner",
+  "description": "Interactive curriculum planning and credit tracking system for 2022 Automation undergraduates, featuring real-time credit calculation, prerequisite visualization, and graduation requirement checking.",
+  "requestFramePermissions": []
+}
