@@ -39,6 +39,30 @@ const App: React.FC = () => {
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [activeTab, setActiveTab] = useState<'graph' | 'matrix'>('graph');
 
+  // 管理员登录后预取全部学生列表，避免需先以学生身份登录
+  useEffect(() => {
+    const fetchAllStudentsForAdmin = async () => {
+      if (currentUser?.isAdmin) {
+        try {
+          const res = await fetch('/.netlify/functions/student-api');
+          if (res.ok) {
+            const list = await res.json();
+            if (Array.isArray(list)) {
+              const mapped = list.reduce<Record<string, StudentProfile>>((acc, s) => {
+                if (s?.id) acc[s.id] = s as StudentProfile;
+                return acc;
+              }, {});
+              setDb({ students: mapped });
+            }
+          }
+        } catch (e) {
+          console.error('Cloud fetch all error', e);
+        }
+      }
+    };
+    fetchAllStudentsForAdmin();
+  }, [currentUser?.isAdmin]);
+
   // 新增：从云端数据库读取
   useEffect(() => {
     const fetchStudentData = async () => {

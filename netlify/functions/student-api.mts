@@ -21,7 +21,14 @@ export default async (req: Request) => {
   if (req.method === 'GET') {
     const url = new URL(req.url);
     const id = url.searchParams.get('id');
-    if (!id) return new Response("Missing ID", { status: 400 });
+    // 无 id 时返回全部学生列表，方便管理员直接查看
+    if (!id) {
+      const rows = await sql`SELECT data FROM students`;
+      return new Response(JSON.stringify(rows.map((r: any) => r.data)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
 
     const rows = await sql`SELECT data FROM students WHERE id = ${id}`;
     if (rows.length === 0) return new Response(JSON.stringify(null), { status: 200 });
