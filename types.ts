@@ -55,5 +55,7 @@ export interface UserState {
 export interface StudentProfile {
   id: string;
   name: string;
+  className?: string;
+  grade?: string;
   selectedIds: string[];
 }

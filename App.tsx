@@ -40,31 +40,80 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'graph' | 'matrix'>('graph');
   const [newStudentId, setNewStudentId] = useState('');
   const [newStudentName, setNewStudentName] = useState('');
+  const [newStudentClass, setNewStudentClass] = useState('');
+  const [newStudentGrade, setNewStudentGrade] = useState('');
+  const [adminView, setAdminView] = useState<'planner' | 'dashboard'>('planner');
+  const [detailId, setDetailId] = useState('');
+  const [detailName, setDetailName] = useState('');
+  const [detailClassName, setDetailClassName] = useState('');
+  const [detailGrade, setDetailGrade] = useState('');
   const [adminNotice, setAdminNotice] = useState('');
 
-  // 管理员登录后预取全部学生列表，避免需先以学生身份登录
-  useEffect(() => {
-    const fetchAllStudentsForAdmin = async () => {
-      if (currentUser?.isAdmin) {
-        try {
-          const res = await fetch('/.netlify/functions/student-api');
-          if (res.ok) {
-            const list = await res.json();
-            if (Array.isArray(list)) {
-              const mapped = list.reduce<Record<string, StudentProfile>>((acc, s) => {
-                if (s?.id) acc[s.id] = s as StudentProfile;
-                return acc;
-              }, {});
-              setDb({ students: mapped });
-            }
-          }
-        } catch (e) {
-          console.error('Cloud fetch all error', e);
-        }
+  interface RequirementStatus {
+    id: string;
+    name: string;
+    current: number;
+    target: number;
+    isMet: boolean;
+    description?: string;
+    category?: CourseCategory;
+  }
+
+  const computeStatsForSet = (selectedSet: Set<string>) => {
+    const selectedCourses = COURSES.filter(c => selectedSet.has(c.id));
+    const validCoursesForTotal = selectedCourses.filter(
+      c => c.category !== CourseCategory.SecondClass && c.category !== CourseCategory.Honors
+    );
+    const totalCredits = validCoursesForTotal.reduce((sum, c) => sum + c.actualCredit, 0);
+
+    const creditsBySubCategory: Record<string, number> = {};
+    const creditsByCategory: Record<string, number> = {};
+
+    selectedCourses.forEach(c => {
+      const subKey = c.subCategory;
+      creditsBySubCategory[subKey] = (creditsBySubCategory[subKey] || 0) + c.actualCredit;
+
+      const catKey = c.category;
+      creditsByCategory[catKey] = (creditsByCategory[catKey] || 0) + c.actualCredit;
+    });
+
+    return { totalCredits, creditsBySubCategory, creditsByCategory };
+  };
+
+  const getRequirementStatus = (
+    req: RequirementRule,
+    selectedSet: Set<string>,
+    stats: { creditsBySubCategory: Record<string, number>; creditsByCategory: Record<string, number> }
+  ): RequirementStatus => {
+    let current = 0;
+    const target = req.requiredCredits || req.requiredCount || 0;
+    let isMet = false;
+
+    if (req.customValue) {
+      current = req.customValue(selectedSet, COURSES);
+      isMet = current >= target;
+    } else if (req.customCheck) {
+      isMet = req.customCheck(selectedSet, COURSES);
+      current = isMet ? target : 0;
+    } else {
+      if (req.subCategory) {
+        current = stats.creditsBySubCategory[req.subCategory] || 0;
+      } else if (req.category) {
+        current = stats.creditsByCategory[req.category] || 0;
       }
+      isMet = current >= target;
+    }
+
+    return {
+      id: req.id,
+      name: req.name,
+      current,
+      target,
+      isMet,
+      description: req.description,
+      category: req.category
     };
-    fetchAllStudentsForAdmin();
-  }, [currentUser?.isAdmin]);
+  };
 
   // 管理员登录后预取全部学生列表
   useEffect(() => {
@@ -125,6 +174,15 @@ const App: React.FC = () => {
     }
   }, [viewingStudentId]); // Intentionally not depending on DB to avoid loops, only when ID switches
 
+  // 同步当前选中学生的基本信息到编辑表单
+  useEffect(() => {
+    const s = viewingStudentId ? db.students[viewingStudentId] : null;
+    setDetailId(s?.id || viewingStudentId || '');
+    setDetailName(s?.name || '');
+    setDetailClassName(s?.className || '');
+    setDetailGrade(s?.grade || '');
+  }, [viewingStudentId, db.students]);
+
   // Save selectedIds to DB when they change (if a student is active)
   // 修改：保存到云端数据库
   const handleSelectionChange = async (newSet: Set<string>) => {
@@ -134,6 +192,8 @@ const App: React.FC = () => {
       const currentStudent = db.students[viewingStudentId] || { 
         id: viewingStudentId, 
         name: currentUser?.name || 'Unknown', 
+        className: '',
+        grade: '',
         selectedIds: [] 
       };
       const updatedStudent = {
@@ -164,11 +224,13 @@ const App: React.FC = () => {
     if (!currentUser?.isAdmin) return;
     const id = newStudentId.trim();
     const name = newStudentName.trim();
+    const className = newStudentClass.trim();
+    const grade = newStudentGrade.trim();
     if (!id || !name) {
       setAdminNotice('请填写学号与姓名');
       return;
     }
-    const newProfile: StudentProfile = { id, name, selectedIds: [] };
+    const newProfile: StudentProfile = { id, name, className, grade, selectedIds: [] };
     setDb(prev => ({
       students: { ...prev.students, [id]: newProfile }
     }));
@@ -180,6 +242,10 @@ const App: React.FC = () => {
         body: JSON.stringify(newProfile),
       });
       setAdminNotice('已新增/更新学生');
+      setNewStudentId('');
+      setNewStudentName('');
+      setNewStudentClass('');
+      setNewStudentGrade('');
     } catch (e) {
       console.error('Cloud admin create error', e);
       setAdminNotice('保存失败，请稍后重试');
@@ -202,6 +268,47 @@ const App: React.FC = () => {
     } catch (e) {
       console.error('Cloud admin delete error', e);
       setAdminNotice('删除失败，请稍后重试');
+    }
+  };
+
+  const handleAdminUpdateInfo = async () => {
+    if (!currentUser?.isAdmin || !viewingStudentId) return;
+    const id = detailId.trim();
+    const name = detailName.trim();
+    if (!id || !name) {
+      setAdminNotice('请填写学号与姓名');
+      return;
+    }
+    const prevId = viewingStudentId;
+    const existing = db.students[prevId] || { id: prevId, name, selectedIds: [] };
+    const updated: StudentProfile = {
+      ...existing,
+      id,
+      name,
+      className: detailClassName.trim(),
+      grade: detailGrade.trim(),
+    };
+
+    setDb(prev => {
+      const next = { ...prev.students };
+      delete next[prevId];
+      next[updated.id] = { ...updated };
+      return { students: next };
+    });
+    setViewingStudentId(updated.id);
+
+    try {
+      await fetch('/.netlify/functions/student-api', {
+        method: 'POST',
+        body: JSON.stringify(updated),
+      });
+      if (prevId !== updated.id) {
+        await fetch(`/.netlify/functions/student-api?id=${prevId}`, { method: 'DELETE' });
+      }
+      setAdminNotice('已更新学生信息');
+    } catch (e) {
+      console.error('Cloud admin update error', e);
+      setAdminNotice('更新失败，请稍后重试');
     }
   };
 
@@ -335,6 +442,26 @@ const App: React.FC = () => {
 
     return groups;
   }, [filterSem, filterCategory, viewMode]);
+
+  const adminDashboardRows = useMemo(() => {
+    if (!currentUser?.isAdmin) return [];
+    return Object.values(db.students).map(s => {
+      const statsForSet = computeStatsForSet(new Set(s.selectedIds || []));
+      return {
+        ...s,
+        totalCredits: statsForSet.totalCredits,
+        remaining: Math.max(160 - statsForSet.totalCredits, 0),
+      };
+    });
+  }, [db.students, currentUser?.isAdmin]);
+
+  const detailStudent = viewingStudentId ? db.students[viewingStudentId] : null;
+  const detailSelectedSet = useMemo(() => new Set(detailStudent?.selectedIds || []), [detailStudent]);
+  const detailStatsForView = useMemo(() => computeStatsForSet(detailSelectedSet), [detailSelectedSet]);
+  const detailReqStatuses = useMemo(
+    () => GRADUATION_REQUIREMENTS.map(req => getRequirementStatus(req, detailSelectedSet, detailStatsForView)),
+    [detailSelectedSet, detailStatsForView]
+  );
 
   const activeCourse = COURSES.find(c => c.id === activeCourseId);
 
@@ -509,6 +636,18 @@ const App: React.FC = () => {
                 placeholder="姓名"
                 className="px-2 py-1 rounded bg-blue-800 text-white border border-blue-600 outline-none placeholder:text-blue-200"
               />
+              <input 
+                value={newStudentClass}
+                onChange={e => setNewStudentClass(e.target.value)}
+                placeholder="班级"
+                className="px-2 py-1 rounded bg-blue-800 text-white border border-blue-600 outline-none placeholder:text-blue-200"
+              />
+              <input 
+                value={newStudentGrade}
+                onChange={e => setNewStudentGrade(e.target.value)}
+                placeholder="年级(如2022级)"
+                className="px-2 py-1 rounded bg-blue-800 text-white border border-blue-600 outline-none placeholder:text-blue-200"
+              />
               <button 
                 onClick={handleAdminCreateStudent}
                 className="bg-emerald-600 hover:bg-emerald-500 px-2 py-1 rounded transition text-white font-semibold"
@@ -527,22 +666,57 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* View Switcher (Only show if a student is selected) */}
-        {viewingStudentId && (
-          <div className="flex bg-blue-800/50 p-1 rounded-lg mx-4">
-             <button 
-               onClick={() => setViewMode('major')}
-               className={`px-4 py-1.5 text-sm rounded-md transition ${viewMode === 'major' ? 'bg-white text-primary font-bold shadow' : 'text-blue-100 hover:bg-blue-700/50'}`}
-             >
-               专业培养方案
-             </button>
-             <button 
-               onClick={() => setViewMode('general')}
-               className={`px-4 py-1.5 text-sm rounded-md transition ${viewMode === 'general' ? 'bg-white text-primary font-bold shadow' : 'text-blue-100 hover:bg-blue-700/50'}`}
-             >
-               全校通识与选修
-             </button>
+        {/* Admin view switcher */}
+        {currentUser.isAdmin ? (
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex bg-blue-800/50 p-1 rounded-lg mx-4">
+              <button 
+                onClick={() => setAdminView('planner')}
+                className={`px-4 py-1.5 text-sm rounded-md transition ${adminView === 'planner' ? 'bg-white text-primary font-bold shadow' : 'text-blue-100 hover:bg-blue-700/50'}`}
+              >
+                课程规划
+              </button>
+              <button 
+                onClick={() => setAdminView('dashboard')}
+                className={`px-4 py-1.5 text-sm rounded-md transition ${adminView === 'dashboard' ? 'bg-white text-primary font-bold shadow' : 'text-blue-100 hover:bg-blue-700/50'}`}
+              >
+                统计看板
+              </button>
+            </div>
+            {adminView === 'planner' && viewingStudentId && (
+              <div className="flex bg-blue-800/50 p-1 rounded-lg mx-4">
+                 <button 
+                   onClick={() => setViewMode('major')}
+                   className={`px-4 py-1.5 text-sm rounded-md transition ${viewMode === 'major' ? 'bg-white text-primary font-bold shadow' : 'text-blue-100 hover:bg-blue-700/50'}`}
+                 >
+                   专业培养方案
+                 </button>
+                 <button 
+                   onClick={() => setViewMode('general')}
+                   className={`px-4 py-1.5 text-sm rounded-md transition ${viewMode === 'general' ? 'bg-white text-primary font-bold shadow' : 'text-blue-100 hover:bg-blue-700/50'}`}
+                 >
+                   全校通识与选修
+                 </button>
+              </div>
+            )}
           </div>
+        ) : (
+          viewingStudentId && (
+            <div className="flex bg-blue-800/50 p-1 rounded-lg mx-4">
+               <button 
+                 onClick={() => setViewMode('major')}
+                 className={`px-4 py-1.5 text-sm rounded-md transition ${viewMode === 'major' ? 'bg-white text-primary font-bold shadow' : 'text-blue-100 hover:bg-blue-700/50'}`}
+               >
+                 专业培养方案
+               </button>
+               <button 
+                 onClick={() => setViewMode('general')}
+                 className={`px-4 py-1.5 text-sm rounded-md transition ${viewMode === 'general' ? 'bg-white text-primary font-bold shadow' : 'text-blue-100 hover:bg-blue-700/50'}`}
+               >
+                 全校通识与选修
+               </button>
+            </div>
+          )
         )}
 
         <div className="text-sm flex gap-2">
@@ -553,265 +727,430 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Layout - Only if Viewing Student */}
-      {!viewingStudentId ? (
-        <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 text-slate-400">
-           <div className="text-4xl mb-4">👥</div>
-           <p>请在上方选择一个学生以查看和修改其培养方案</p>
-        </div>
-      ) : (
-      <div className="flex flex-1 overflow-hidden">
-        
-        {/* Left Sidebar: Stats & Check */}
-        <aside className="w-80 bg-white border-r border-slate-200 flex flex-col overflow-y-auto z-10 shadow-sm shrink-0">
-          <div className="p-4 border-b border-slate-100 bg-slate-50 sticky top-0">
-             <div className="mb-2">
-                <div className="flex justify-between text-base mb-1 items-end">
-                  <span className="font-bold text-slate-800">总学分进度</span>
-                  <span className={`text-lg font-mono font-bold ${stats.totalCredits >= 160 ? 'text-success' : 'text-primary'}`}>
-                    {stats.totalCredits} / 160
-                  </span>
-                </div>
-                <div className="w-full bg-slate-200 rounded-full h-3">
-                  <div 
-                    className={`h-3 rounded-full transition-all duration-500 ${stats.totalCredits >= 160 ? 'bg-success' : 'bg-primary'}`} 
-                    style={{ width: `${Math.min((stats.totalCredits / 160) * 100, 100)}%` }}>
+      {currentUser.isAdmin && adminView === 'dashboard' ? (
+        <div className="flex flex-1 overflow-hidden bg-slate-50">
+          <section className="w-2/3 border-r border-slate-200 overflow-y-auto">
+            <div className="p-4 flex justify-between items-center">
+              <div>
+                <h2 className="text-lg font-bold text-slate-800">学生统计</h2>
+                <p className="text-xs text-slate-500">点击行查看详情与培养方案</p>
+              </div>
+              <div className="text-sm text-blue-800 bg-blue-100 px-2 py-1 rounded">
+                总人数 {adminDashboardRows.length}
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-100 text-slate-600">
+                  <tr>
+                    <th className="px-3 py-2 text-left">学号</th>
+                    <th className="px-3 py-2 text-left">姓名</th>
+                    <th className="px-3 py-2 text-left">班级</th>
+                    <th className="px-3 py-2 text-left">年级</th>
+                    <th className="px-3 py-2 text-right">已修学分</th>
+                    <th className="px-3 py-2 text-right">缺口</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {adminDashboardRows.map(row => (
+                    <tr 
+                      key={row.id} 
+                      className="hover:bg-blue-50 cursor-pointer"
+                      onClick={() => { setViewingStudentId(row.id); setAdminView('dashboard'); }}
+                    >
+                      <td className="px-3 py-2 font-mono text-xs text-slate-600">{row.id}</td>
+                      <td className="px-3 py-2 font-medium text-slate-800">{row.name}</td>
+                      <td className="px-3 py-2 text-slate-600">{row.className || '-'}</td>
+                      <td className="px-3 py-2 text-slate-600">{row.grade || '-'}</td>
+                      <td className="px-3 py-2 text-right font-semibold text-slate-800">{row.totalCredits}</td>
+                      <td className="px-3 py-2 text-right text-rose-600">{row.remaining}</td>
+                    </tr>
+                  ))}
+                  {adminDashboardRows.length === 0 && (
+                    <tr><td className="px-3 py-4 text-center text-slate-400" colSpan={6}>暂无学生数据</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="flex-1 overflow-y-auto p-4 bg-white">
+            {detailStudent ? (
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-lg font-bold text-slate-800">个人详情与培养方案</h2>
+                  <div className="flex gap-2 text-xs">
+                    <button
+                      onClick={handleAdminUpdateInfo}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1 rounded"
+                    >
+                      保存信息
+                    </button>
+                    <button
+                      onClick={() => setAdminView('planner')}
+                      className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded"
+                    >
+                      打开课程规划
+                    </button>
+                    <button
+                      onClick={handleAdminDeleteStudent}
+                      className="bg-rose-600 hover:bg-rose-500 text-white px-3 py-1 rounded"
+                    >
+                      删除
+                    </button>
                   </div>
                 </div>
-                <div className="text-[10px] text-slate-400 text-right mt-1">*不含第二课堂</div>
-             </div>
-          </div>
 
-          <div className="p-4 space-y-6">
-             {viewMode === 'major' ? (
-                 <>
-                    {[
-                      CourseCategory.PublicBasic, 
-                      CourseCategory.ProfessionalClass, 
-                      CourseCategory.Practice, 
-                      CourseCategory.Innovation, // Added here
-                      CourseCategory.SecondClass
-                    ].map(cat => {
-                        const reqs = GRADUATION_REQUIREMENTS.filter(r => r.category === cat);
-                        if (reqs.length === 0) return null;
-                        return (
-                            <div key={cat} className="space-y-1">
-                                <h3 className="font-bold text-xs text-slate-400 uppercase tracking-wider border-b pb-1 mb-2">{cat}</h3>
-                                {reqs.map(renderRequirement)}
-                            </div>
-                        );
-                    })}
-                 </>
-             ) : (
-                 <>
-                    <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 mb-4 text-xs text-blue-800">
-                        <strong>通识选修说明：</strong><br/>
-                        需选修至少6学分。含“四史”1门、美育1门、核心(★)1门。工科学生需选《经济学原理》或《现代工程导论》。
-                        <br/><br/>
-                        <strong>创新创业教育说明：</strong><br/>
-                        需选修至少2学分。
-                    </div>
-                    {[CourseCategory.GeneralEducation, CourseCategory.Innovation].map(cat => {
-                        const reqs = GRADUATION_REQUIREMENTS.filter(r => r.category === cat);
-                        if (reqs.length === 0) return null;
-                        return (
-                            <div key={cat} className="space-y-1">
-                                <h3 className="font-bold text-xs text-slate-400 uppercase tracking-wider border-b pb-1 mb-2">{cat}</h3>
-                                {reqs.map(renderRequirement)}
-                            </div>
-                        );
-                    })}
-                 </>
-             )}
-          </div>
-        </aside>
-
-        {/* Center: Course List */}
-        <main className="flex-1 bg-slate-100 flex flex-col min-w-0">
-          {/* Filters */}
-          <div className="bg-white p-3 border-b border-slate-200 flex gap-3 flex-wrap shadow-sm z-10 items-center shrink-0">
-             <label className="text-xs font-bold text-slate-500">筛选:</label>
-             <select 
-               className="border border-slate-300 rounded px-2 py-1 text-sm bg-white hover:border-blue-500 focus:outline-none max-w-[200px]"
-               value={filterCategory}
-               onChange={e => setFilterCategory(e.target.value)}
-             >
-               <option value="all">所有课程类别</option>
-               {Object.values(CourseCategory).map(c => <option key={c} value={c}>{c}</option>)}
-             </select>
-             <select 
-               className="border border-slate-300 rounded px-2 py-1 text-sm bg-white hover:border-blue-500 focus:outline-none"
-               value={filterSem}
-               onChange={e => setFilterSem(e.target.value)}
-             >
-               <option value="all">所有学期</option>
-               {ALL_SEMESTERS.map(s => <option key={s} value={s}>{s}</option>)}
-             </select>
-          </div>
-
-          {/* Table */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            {Object.keys(groupedCourses).length === 0 && (
-                <div className="text-center p-10 text-slate-400">无符合条件的课程</div>
-            )}
-
-            {Object.entries(groupedCourses).map(([catName, subCats]) => (
-              <div key={catName} className="bg-white rounded-lg shadow-sm ring-1 ring-slate-900/5 overflow-hidden">
-                <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 font-bold text-slate-700 flex items-center gap-2">
-                  <span className="w-1.5 h-4 bg-primary rounded-full"></span>
-                  {catName}
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-slate-500">学号</span>
+                    <input 
+                      value={detailId}
+                      onChange={e => setDetailId(e.target.value)}
+                      className="px-3 py-2 border rounded outline-none border-slate-300 focus:border-blue-500"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-slate-500">姓名</span>
+                    <input 
+                      value={detailName}
+                      onChange={e => setDetailName(e.target.value)}
+                      className="px-3 py-2 border rounded outline-none border-slate-300 focus:border-blue-500"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-slate-500">班级</span>
+                    <input 
+                      value={detailClassName}
+                      onChange={e => setDetailClassName(e.target.value)}
+                      className="px-3 py-2 border rounded outline-none border-slate-300 focus:border-blue-500"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-slate-500">年级</span>
+                    <input 
+                      value={detailGrade}
+                      onChange={e => setDetailGrade(e.target.value)}
+                      className="px-3 py-2 border rounded outline-none border-slate-300 focus:border-blue-500"
+                    />
+                  </label>
                 </div>
-                
-                {Object.entries(subCats).map(([subCatName, modules]) => (
-                  <div key={subCatName} className="border-b border-slate-100 last:border-0">
-                    <div className="bg-slate-50/50 px-4 py-1.5 text-xs font-bold text-slate-500 uppercase tracking-wide">
-                      {subCatName}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+                    <div className="text-xs text-blue-700">已修学分</div>
+                    <div className="text-2xl font-bold text-blue-800">{detailStatsForView.totalCredits}</div>
+                  </div>
+                  <div className="bg-amber-50 border border-amber-100 rounded-lg p-3">
+                    <div className="text-xs text-amber-700">距离 160 学分</div>
+                    <div className="text-2xl font-bold text-amber-800">
+                      {Math.max(160 - detailStatsForView.totalCredits, 0)}
                     </div>
-                    
-                    {Object.entries(modules).map(([moduleName, courses]) => (
-                      <div key={moduleName}>
-                        {moduleName !== '默认' && (
-                          <div className="px-4 py-1 text-xs text-blue-600 font-medium bg-blue-50 border-l-4 border-blue-200 pl-3">
-                            {moduleName}
-                          </div>
-                        )}
-                        <table className="w-full text-sm text-left">
-                          <tbody className="divide-y divide-slate-100">
-                            {courses.map(course => {
-                              const isSelected = selectedIds.has(course.id);
-                              const isActive = activeCourseId === course.id;
-                              return (
-                                <tr 
-                                  key={course.id} 
-                                  className={`hover:bg-blue-50 transition cursor-pointer ${isActive ? 'bg-blue-50' : ''}`}
-                                  onClick={() => setActiveCourseId(course.id)}
-                                >
-                                  <td className="px-4 py-3 w-10 text-center" onClick={(e) => e.stopPropagation()}>
-                                    <input 
-                                      type="checkbox" 
-                                      checked={isSelected} 
-                                      onChange={() => toggleCourse(course.id)}
-                                      className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary cursor-pointer accent-blue-600"
-                                    />
-                                  </td>
-                                  <td className="px-4 py-3 font-mono text-xs text-slate-400 w-24">{course.code}</td>
-                                  <td className="px-4 py-3 font-medium text-slate-900">
-                                    {course.isCore && <span className="text-amber-500 mr-1" title="核心课程">★</span>}
-                                    {course.name}
-                                    {course.type === CourseType.Elective && (
-                                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-normal">选</span>
-                                    )}
-                                     {course.type === CourseType.Compulsory && (
-                                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-normal">必</span>
-                                    )}
-                                  </td>
-                                  <td className="px-4 py-3 w-20 text-slate-600 font-semibold text-right">{course.credit}学分</td>
-                                  <td className="px-4 py-3 w-24 text-slate-500 text-right">{course.semester}</td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                  <h4 className="text-sm font-bold text-slate-700 mb-2">类别学分完成情况</h4>
+                  <div className="grid grid-cols-2 gap-2 text-xs text-slate-700">
+                    {Object.entries(detailStatsForView.creditsByCategory).map(([cat, val]) => (
+                      <div key={cat} className="flex justify-between bg-white px-2 py-1 rounded border border-slate-100">
+                        <span className="truncate">{cat}</span>
+                        <span className="font-mono">{val}</span>
+                      </div>
+                    ))}
+                    {Object.keys(detailStatsForView.creditsByCategory).length === 0 && (
+                      <div className="text-slate-400">暂无已选课程</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-white border border-slate-200 rounded-lg p-3">
+                  <h4 className="text-sm font-bold text-slate-700 mb-2">培养方案完成情况</h4>
+                  <div className="space-y-2 text-xs">
+                    {detailReqStatuses.map(r => (
+                      <div key={r.id} className="flex justify-between items-center bg-slate-50 px-2 py-1 rounded">
+                        <div className="flex items-center gap-2 truncate">
+                          <span className={`w-2 h-2 rounded-full ${r.isMet ? 'bg-green-500' : 'bg-amber-400'}`} />
+                          <span className="truncate" title={r.description}>{r.name}</span>
+                        </div>
+                        <span className={`font-mono ${r.isMet ? 'text-green-600' : 'text-slate-600'}`}>
+                          {r.target ? `${r.current}/${r.target}` : (r.isMet ? '已满足' : '未满足')}
+                        </span>
                       </div>
                     ))}
                   </div>
-                ))}
+                </div>
               </div>
-            ))}
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-2">
+                <div className="text-4xl">👤</div>
+                <p className="text-sm">请选择左侧学生查看详情与培养方案</p>
+              </div>
+            )}
+          </section>
+        </div>
+      ) : (
+      <>
+        {!viewingStudentId ? (
+          <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 text-slate-400">
+             <div className="text-4xl mb-4">👥</div>
+             <p>请在上方选择一个学生以查看和修改其培养方案</p>
           </div>
-        </main>
-
-        {/* Right Sidebar: Visuals */}
-        <aside className="w-96 bg-white border-l border-slate-200 flex flex-col z-10 shadow-sm overflow-hidden shrink-0">
-           <div className="flex border-b border-slate-200 shrink-0">
-             <button 
-               onClick={() => setActiveTab('graph')}
-               className={`flex-1 py-3 text-sm font-medium transition ${activeTab === 'graph' ? 'text-primary border-b-2 border-primary bg-blue-50/50' : 'text-slate-500 hover:text-slate-700'}`}
-             >
-               课程关系
-             </button>
-             <button 
-               onClick={() => setActiveTab('matrix')}
-               className={`flex-1 py-3 text-sm font-medium transition ${activeTab === 'matrix' ? 'text-primary border-b-2 border-primary bg-blue-50/50' : 'text-slate-500 hover:text-slate-700'}`}
-             >
-               毕业要求
-             </button>
-           </div>
-           
-           <div className="flex-1 overflow-y-auto p-4 bg-slate-50">
-             {activeCourse ? (
-               <>
-                 <div className="bg-white p-4 rounded-lg shadow-sm mb-4 border border-slate-100">
-                   <h3 className="font-bold text-lg text-slate-800 flex items-center gap-2">
-                       {activeCourse.isCore && <span className="text-amber-500">★</span>}
-                       {activeCourse.name}
-                   </h3>
-                   <div className="mt-2 grid grid-cols-2 gap-y-2 text-xs text-slate-500">
-                     <div><span className="text-slate-400">代码:</span> {activeCourse.code}</div>
-                     <div><span className="text-slate-400">学分:</span> {activeCourse.credit}</div>
-                     <div><span className="text-slate-400">学期:</span> {activeCourse.semester}</div>
-                     <div><span className="text-slate-400">属性:</span> {activeCourse.type}</div>
-                     <div className="col-span-2"><span className="text-slate-400">类别:</span> {activeCourse.category} - {activeCourse.subCategory}</div>
-                     {activeCourse.module && <div className="col-span-2 text-blue-600"><span className="text-slate-400 text-slate-500">模块:</span> {activeCourse.module}</div>}
-                   </div>
-                 </div>
-
-                 {activeTab === 'graph' && (
-                    <CourseGraph 
-                      selectedCourseId={activeCourseId} 
-                      allCourses={COURSES} 
-                      userSelectedIds={Array.from(selectedIds)} 
-                    />
-                 )}
-
-                 {activeTab === 'matrix' && (
-                   <div className="bg-white p-4 rounded-lg shadow-sm">
-                      <h4 className="text-sm font-bold text-slate-700 mb-2">毕业要求指标点覆盖</h4>
-                      
-                      <div className="grid grid-cols-7 gap-1 mb-4">
-                        {[1,2,3,4,5,6,7,8,9,10,11,12,13].map(reqNum => {
-                           const supports = activeCourse.graduationReqs.includes(reqNum);
-                           const isCourseSelected = selectedIds.has(activeCourse.id);
-                           return (
-                             <div 
-                                key={reqNum}
-                                className={`
-                                  aspect-square flex items-center justify-center rounded text-xs font-bold border transition
-                                  ${supports 
-                                    ? (isCourseSelected ? 'bg-green-500 text-white border-green-600' : 'bg-green-100 text-green-700 border-green-300') 
-                                    : 'bg-slate-50 text-slate-300 border-slate-100'}
-                                `}
-                                title={`要求 ${reqNum}: ${(REQ_DESCRIPTIONS as any)[reqNum]}`}
-                             >
-                               {reqNum}
-                             </div>
-                           );
-                        })}
-                      </div>
-                      
-                      <div className="text-xs space-y-2">
-                         {activeCourse.graduationReqs.length > 0 ? activeCourse.graduationReqs.map(r => (
-                           <div key={r} className="flex gap-2">
-                             <span className="font-bold text-slate-700 whitespace-nowrap">要求 {r}:</span>
-                             <span className="text-slate-600">{(REQ_DESCRIPTIONS as any)[r]}</span>
-                           </div>
-                         )) : (
-                           <div className="text-slate-400 italic">此课程不直接对应具体的毕业要求指标点。</div>
-                         )}
-                      </div>
-                   </div>
-                 )}
-               </>
-             ) : (
-               <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                  <svg className="w-12 h-12 mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                  <p className="text-sm">请在左侧点击选择一门课程<br/>查看详情与可视化分析</p>
+        ) : (
+        <div className="flex flex-1 overflow-hidden">
+          
+          {/* Left Sidebar: Stats & Check */}
+          <aside className="w-80 bg-white border-r border-slate-200 flex flex-col overflow-y-auto z-10 shadow-sm shrink-0">
+            <div className="p-4 border-b border-slate-100 bg-slate-50 sticky top-0">
+               <div className="mb-2">
+                  <div className="flex justify-between text-base mb-1 items-end">
+                    <span className="font-bold text-slate-800">总学分进度</span>
+                    <span className={`text-lg font-mono font-bold ${stats.totalCredits >= 160 ? 'text-success' : 'text-primary'}`}>
+                      {stats.totalCredits} / 160
+                    </span>
+                  </div>
+                  <div className="w-full bg-slate-200 rounded-full h-3">
+                    <div 
+                      className={`h-3 rounded-full transition-all duration-500 ${stats.totalCredits >= 160 ? 'bg-success' : 'bg-primary'}`} 
+                      style={{ width: `${Math.min((stats.totalCredits / 160) * 100, 100)}%` }}>
+                    </div>
+                  </div>
+                  <div className="text-[10px] text-slate-400 text-right mt-1">*不含第二课堂</div>
                </div>
-             )}
-           </div>
-        </aside>
+            </div>
 
-      </div>
+            <div className="p-4 space-y-6">
+               {viewMode === 'major' ? (
+                   <>
+                      {[
+                        CourseCategory.PublicBasic, 
+                        CourseCategory.ProfessionalClass, 
+                        CourseCategory.Practice, 
+                        CourseCategory.Innovation, // Added here
+                        CourseCategory.SecondClass
+                      ].map(cat => {
+                          const reqs = GRADUATION_REQUIREMENTS.filter(r => r.category === cat);
+                          if (reqs.length === 0) return null;
+                          return (
+                              <div key={cat} className="space-y-1">
+                                  <h3 className="font-bold text-xs text-slate-400 uppercase tracking-wider border-b pb-1 mb-2">{cat}</h3>
+                                  {reqs.map(renderRequirement)}
+                              </div>
+                          );
+                      })}
+                   </>
+               ) : (
+                   <>
+                      <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 mb-4 text-xs text-blue-800">
+                          <strong>通识选修说明：</strong><br/>
+                          需选修至少6学分。含“四史”1门、美育1门、核心(★)1门。工科学生需选《经济学原理》或《现代工程导论》。
+                          <br/><br/>
+                          <strong>创新创业教育说明：</strong><br/>
+                          需选修至少2学分。
+                      </div>
+                      {[CourseCategory.GeneralEducation, CourseCategory.Innovation].map(cat => {
+                          const reqs = GRADUATION_REQUIREMENTS.filter(r => r.category === cat);
+                          if (reqs.length === 0) return null;
+                          return (
+                              <div key={cat} className="space-y-1">
+                                  <h3 className="font-bold text-xs text-slate-400 uppercase tracking-wider border-b pb-1 mb-2">{cat}</h3>
+                                  {reqs.map(renderRequirement)}
+                              </div>
+                          );
+                      })}
+                   </>
+               )}
+            </div>
+          </aside>
+
+          {/* Center: Course List */}
+          <main className="flex-1 bg-slate-100 flex flex-col min-w-0">
+            {/* Filters */}
+            <div className="bg-white p-3 border-b border-slate-200 flex gap-3 flex-wrap shadow-sm z-10 items-center shrink-0">
+               <label className="text-xs font-bold text-slate-500">筛选:</label>
+               <select 
+                 className="border border-slate-300 rounded px-2 py-1 text-sm bg-white hover:border-blue-500 focus:outline-none max-w-[200px]"
+                 value={filterCategory}
+                 onChange={e => setFilterCategory(e.target.value)}
+               >
+                 <option value="all">所有课程类别</option>
+                 {Object.values(CourseCategory).map(c => <option key={c} value={c}>{c}</option>)}
+               </select>
+               <select 
+                 className="border border-slate-300 rounded px-2 py-1 text-sm bg-white hover:border-blue-500 focus:outline-none"
+                 value={filterSem}
+                 onChange={e => setFilterSem(e.target.value)}
+               >
+                 <option value="all">所有学期</option>
+                 {ALL_SEMESTERS.map(s => <option key={s} value={s}>{s}</option>)}
+               </select>
+            </div>
+
+            {/* Table */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+              {Object.keys(groupedCourses).length === 0 && (
+                  <div className="text-center p-10 text-slate-400">无符合条件的课程</div>
+              )}
+
+              {Object.entries(groupedCourses).map(([catName, subCats]) => (
+                <div key={catName} className="bg-white rounded-lg shadow-sm ring-1 ring-slate-900/5 overflow-hidden">
+                  <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 font-bold text-slate-700 flex items-center gap-2">
+                    <span className="w-1.5 h-4 bg-primary rounded-full"></span>
+                    {catName}
+                  </div>
+                  
+                  {Object.entries(subCats).map(([subCatName, modules]) => (
+                    <div key={subCatName} className="border-b border-slate-100 last:border-0">
+                      <div className="bg-slate-50/50 px-4 py-1.5 text-xs font-bold text-slate-500 uppercase tracking-wide">
+                        {subCatName}
+                      </div>
+                      
+                      {Object.entries(modules).map(([moduleName, courses]) => (
+                        <div key={moduleName}>
+                          {moduleName !== '默认' && (
+                            <div className="px-4 py-1 text-xs text-blue-600 font-medium bg-blue-50 border-l-4 border-blue-200 pl-3">
+                              {moduleName}
+                            </div>
+                          )}
+                          <table className="w-full text-sm text-left">
+                            <tbody className="divide-y divide-slate-100">
+                              {courses.map(course => {
+                                const isSelected = selectedIds.has(course.id);
+                                const isActive = activeCourseId === course.id;
+                                return (
+                                  <tr 
+                                    key={course.id} 
+                                    className={`hover:bg-blue-50 transition cursor-pointer ${isActive ? 'bg-blue-50' : ''}`}
+                                    onClick={() => setActiveCourseId(course.id)}
+                                  >
+                                    <td className="px-4 py-3 w-10 text-center" onClick={(e) => e.stopPropagation()}>
+                                      <input 
+                                        type="checkbox" 
+                                        checked={isSelected} 
+                                        onChange={() => toggleCourse(course.id)}
+                                        className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary cursor-pointer accent-blue-600"
+                                      />
+                                    </td>
+                                    <td className="px-4 py-3 font-mono text-xs text-slate-400 w-24">{course.code}</td>
+                                    <td className="px-4 py-3 font-medium text-slate-900">
+                                      {course.isCore && <span className="text-amber-500 mr-1" title="核心课程">★</span>}
+                                      {course.name}
+                                      {course.type === CourseType.Elective && (
+                                        <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-normal">选</span>
+                                      )}
+                                       {course.type === CourseType.Compulsory && (
+                                        <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-normal">必</span>
+                                      )}
+                                    </td>
+                                    <td className="px-4 py-3 w-20 text-slate-600 font-semibold text-right">{course.credit}学分</td>
+                                    <td className="px-4 py-3 w-24 text-slate-500 text-right">{course.semester}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </main>
+
+          {/* Right Sidebar: Visuals */}
+          <aside className="w-96 bg-white border-l border-slate-200 flex flex-col z-10 shadow-sm overflow-hidden shrink-0">
+             <div className="flex border-b border-slate-200 shrink-0">
+               <button 
+                 onClick={() => setActiveTab('graph')}
+                 className={`flex-1 py-3 text-sm font-medium transition ${activeTab === 'graph' ? 'text-primary border-b-2 border-primary bg-blue-50/50' : 'text-slate-500 hover:text-slate-700'}`}
+               >
+                 课程关系
+               </button>
+               <button 
+                 onClick={() => setActiveTab('matrix')}
+                 className={`flex-1 py-3 text-sm font-medium transition ${activeTab === 'matrix' ? 'text-primary border-b-2 border-primary bg-blue-50/50' : 'text-slate-500 hover:text-slate-700'}`}
+               >
+                 毕业要求
+               </button>
+             </div>
+             
+             <div className="flex-1 overflow-y-auto p-4 bg-slate-50">
+               {activeCourse ? (
+                 <>
+                   <div className="bg-white p-4 rounded-lg shadow-sm mb-4 border border-slate-100">
+                     <h3 className="font-bold text-lg text-slate-800 flex items-center gap-2">
+                         {activeCourse.isCore && <span className="text-amber-500">★</span>}
+                         {activeCourse.name}
+                     </h3>
+                     <div className="mt-2 grid grid-cols-2 gap-y-2 text-xs text-slate-500">
+                       <div><span className="text-slate-400">代码:</span> {activeCourse.code}</div>
+                       <div><span className="text-slate-400">学分:</span> {activeCourse.credit}</div>
+                       <div><span className="text-slate-400">学期:</span> {activeCourse.semester}</div>
+                       <div><span className="text-slate-400">属性:</span> {activeCourse.type}</div>
+                       <div className="col-span-2"><span className="text-slate-400">类别:</span> {activeCourse.category} - {activeCourse.subCategory}</div>
+                       {activeCourse.module && <div className="col-span-2 text-blue-600"><span className="text-slate-400 text-slate-500">模块:</span> {activeCourse.module}</div>}
+                     </div>
+                   </div>
+
+                   {activeTab === 'graph' && (
+                      <CourseGraph 
+                        selectedCourseId={activeCourseId} 
+                        allCourses={COURSES} 
+                        userSelectedIds={Array.from(selectedIds)} 
+                      />
+                   )}
+
+                   {activeTab === 'matrix' && (
+                     <div className="bg-white p-4 rounded-lg shadow-sm">
+                        <h4 className="text-sm font-bold text-slate-700 mb-2">毕业要求指标点覆盖</h4>
+                        
+                        <div className="grid grid-cols-7 gap-1 mb-4">
+                          {[1,2,3,4,5,6,7,8,9,10,11,12,13].map(reqNum => {
+                             const supports = activeCourse.graduationReqs.includes(reqNum);
+                             const isCourseSelected = selectedIds.has(activeCourse.id);
+                             return (
+                               <div 
+                                  key={reqNum}
+                                  className={`
+                                    aspect-square flex items-center justify-center rounded text-xs font-bold border transition
+                                    ${supports 
+                                      ? (isCourseSelected ? 'bg-green-500 text-white border-green-600' : 'bg-green-100 text-green-700 border-green-300') 
+                                      : 'bg-slate-50 text-slate-300 border-slate-100'}
+                                  `}
+                                  title={`要求 ${reqNum}: ${(REQ_DESCRIPTIONS as any)[reqNum]}`}
+                               >
+                                 {reqNum}
+                               </div>
+                             );
+                          })}
+                        </div>
+                        
+                        <div className="text-xs space-y-2">
+                           {activeCourse.graduationReqs.length > 0 ? activeCourse.graduationReqs.map(r => (
+                             <div key={r} className="flex gap-2">
+                               <span className="font-bold text-slate-700 whitespace-nowrap">要求 {r}:</span>
+                               <span className="text-slate-600">{(REQ_DESCRIPTIONS as any)[r]}</span>
+                             </div>
+                           )) : (
+                             <div className="text-slate-400 italic">此课程不直接对应具体的毕业要求指标点。</div>
+                           )}
+                        </div>
+                     </div>
+                   )}
+                 </>
+               ) : (
+                 <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                    <svg className="w-12 h-12 mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                    <p className="text-sm">请在左侧点击选择一门课程<br/>查看详情与可视化分析</p>
+                 </div>
+               )}
+             </div>
+          </aside>
+
+        </div>
+        )}
+      </>
       )}
     </div>
   );
